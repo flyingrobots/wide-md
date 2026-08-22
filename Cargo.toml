@@ -1,0 +1,16 @@
+[package]
+name = "wide-md"
+version = "0.1.0"
+edition = "2024"
+description = "Remove artificial hard wrapping from Markdown"
+
+[dependencies]
+pulldown-cmark = { version = "0.13.4", default-features = false }
+
+[lib]
+name = "wide_md"
+path = "src/lib.rs"
+
+[[bin]]
+name = "wide-md"
+path = "src/main.rs"
