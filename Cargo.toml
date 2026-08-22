@@ -6,6 +6,7 @@ description = "Remove artificial hard wrapping from Markdown"
 
 [dependencies]
 pulldown-cmark = { version = "0.13.4", default-features = false }
+unicode-width = "0.2.2"
 
 [lib]
 name = "wide_md"
