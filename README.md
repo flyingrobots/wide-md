@@ -142,3 +142,7 @@ This paragraph has been manually wrapped even though Markdown can render it at w
 
 - List items can be wrapped too.
 ```
+
+## License
+
+Licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE).
