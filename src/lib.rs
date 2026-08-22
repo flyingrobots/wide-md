@@ -1,5 +1,7 @@
 //! Markdown-aware removal of soft line breaks.
 
+pub mod cli;
+
 use std::num::NonZeroUsize;
 use std::ops::Range;
 
