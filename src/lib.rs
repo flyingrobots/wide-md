@@ -4,6 +4,7 @@ pub mod cli;
 
 use std::num::NonZeroUsize;
 use std::ops::Range;
+use std::{error, fmt};
 
 use pulldown_cmark::{Event, Options, Parser, Tag};
 use unicode_width::UnicodeWidthChar;
@@ -16,15 +17,48 @@ pub struct FormatOptions {
     pub width: Option<NonZeroUsize>,
 }
 
+/// A source construct that cannot be formatted safely by the built-in
+/// Markdown profile.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum FormatError {
+    /// A `:::` custom container marker outside a literal block.
+    UnsupportedCustomContainer { line: usize },
+}
+
+impl fmt::Display for FormatError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::UnsupportedCustomContainer { line } => write!(
+                formatter,
+                "unsupported custom container syntax at line {line}; `:::` containers require a dialect-aware formatter"
+            ),
+        }
+    }
+}
+
+impl error::Error for FormatError {}
+
 /// Formats Markdown by removing soft wrapping and, when requested, reflowing
-/// prose to a maximum source width.
-pub fn format_markdown(input: &str, options: FormatOptions) -> String {
-    let unwrapped = unwrap_markdown(input);
+/// prose to a maximum source width. A leading UTF-8 byte-order mark is
+/// preserved around the complete formatting pipeline.
+///
+/// # Errors
+///
+/// Returns [`FormatError`] when the source contains a known unsupported
+/// construct that the built-in Markdown profile cannot rewrite safely.
+pub fn format_markdown(input: &str, options: FormatOptions) -> Result<String, FormatError> {
+    let (body, has_bom) = split_bom(input);
+    reject_unsupported_syntax(body)?;
+
+    let unwrapped = unwrap_markdown_body(body);
     let Some(width) = options.width else {
-        return unwrapped;
+        return Ok(restore_bom(unwrapped, has_bom));
     };
 
-    reflow_markdown(&unwrapped, width.get())
+    Ok(restore_bom(
+        reflow_markdown(&unwrapped, width.get()),
+        has_bom,
+    ))
 }
 
 /// Removes soft line breaks from Markdown prose while leaving every other
@@ -33,7 +67,19 @@ pub fn format_markdown(input: &str, options: FormatOptions) -> String {
 /// Markdown's parser decides which newlines are soft breaks. Newlines that
 /// define block structure, fenced or indented code, tables, metadata, raw HTML,
 /// or explicit hard breaks are therefore preserved without bespoke rewriting.
-pub fn unwrap_markdown(input: &str) -> String {
+/// A leading UTF-8 byte-order mark is preserved and excluded from parsing.
+///
+/// # Errors
+///
+/// Returns [`FormatError`] when the source contains a known unsupported
+/// construct that the built-in Markdown profile cannot rewrite safely.
+pub fn unwrap_markdown(input: &str) -> Result<String, FormatError> {
+    let (body, has_bom) = split_bom(input);
+    reject_unsupported_syntax(body)?;
+    Ok(restore_bom(unwrap_markdown_body(body), has_bom))
+}
+
+fn unwrap_markdown_body(input: &str) -> String {
     let mut output = String::with_capacity(input.len());
     let mut copied_through = 0;
 
@@ -55,6 +101,70 @@ pub fn unwrap_markdown(input: &str) -> String {
 
     output.push_str(&input[copied_through..]);
     output
+}
+
+fn split_bom(input: &str) -> (&str, bool) {
+    input
+        .strip_prefix('\u{feff}')
+        .map_or((input, false), |body| (body, true))
+}
+
+fn restore_bom(output: String, has_bom: bool) -> String {
+    if !has_bom {
+        return output;
+    }
+
+    let mut with_bom = String::with_capacity('\u{feff}'.len_utf8() + output.len());
+    with_bom.push('\u{feff}');
+    with_bom.push_str(&output);
+    with_bom
+}
+
+fn reject_unsupported_syntax(input: &str) -> Result<(), FormatError> {
+    if let Some(line) = custom_container_line(input) {
+        return Err(FormatError::UnsupportedCustomContainer { line });
+    }
+    Ok(())
+}
+
+fn custom_container_line(input: &str) -> Option<usize> {
+    let literal_ranges = literal_block_ranges(input);
+    let mut line_start = 0;
+
+    for (line_index, source_line) in input.split_inclusive('\n').enumerate() {
+        let line_end = line_start + source_line.len();
+        let is_literal = literal_ranges
+            .iter()
+            .any(|range| range.start < line_end && range.end > line_start);
+        let line = source_line.strip_suffix('\n').unwrap_or(source_line);
+        let line = line.strip_suffix('\r').unwrap_or(line);
+
+        if !is_literal && line_starts_custom_container(line) {
+            return Some(line_index + 1);
+        }
+        line_start = line_end;
+    }
+
+    None
+}
+
+fn literal_block_ranges(input: &str) -> Vec<Range<usize>> {
+    Parser::new_ext(input, parser_options())
+        .into_offset_iter()
+        .filter_map(|(event, range)| match event {
+            Event::Start(Tag::CodeBlock(_) | Tag::HtmlBlock | Tag::MetadataBlock(_)) => Some(range),
+            _ => None,
+        })
+        .collect()
+}
+
+fn line_starts_custom_container(line: &str) -> bool {
+    wrapping_parts(line).is_some_and(|parts| {
+        parts
+            .content
+            .trim_start_matches([' ', '\t'])
+            .starts_with(":::")
+    })
 }
 
 fn reflow_markdown(input: &str, width: usize) -> String {
@@ -510,7 +620,11 @@ fn parser_options() -> Options {
 mod tests {
     use std::num::NonZeroUsize;
 
-    use super::{FormatOptions, format_markdown, unwrap_markdown};
+    use super::{FormatError, FormatOptions, format_markdown, unwrap_markdown};
+
+    fn unwrap(input: &str) -> String {
+        unwrap_markdown(input).expect("test input should use supported Markdown syntax")
+    }
 
     fn format_at_width(input: &str, width: usize) -> String {
         format_markdown(
@@ -519,6 +633,7 @@ mod tests {
                 width: NonZeroUsize::new(width),
             },
         )
+        .expect("test input should use supported Markdown syntax")
     }
 
     #[test]
@@ -526,7 +641,7 @@ mod tests {
         let input = "This paragraph was wrapped at\neighty columns and should become\none physical line.\n\nAnother paragraph.\n";
         let expected = "This paragraph was wrapped at eighty columns and should become one physical line.\n\nAnother paragraph.\n";
 
-        assert_eq!(unwrap_markdown(input), expected);
+        assert_eq!(unwrap(input), expected);
     }
 
     #[test]
@@ -534,7 +649,7 @@ mod tests {
         let input = "# Heading\n\nA wrapped setext\nheading\n=======\n\n---\n\nText\n";
         let expected = "# Heading\n\nA wrapped setext heading\n=======\n\n---\n\nText\n";
 
-        assert_eq!(unwrap_markdown(input), expected);
+        assert_eq!(unwrap(input), expected);
     }
 
     #[test]
@@ -542,7 +657,7 @@ mod tests {
         let input = "Before this\ncode.\n\n```rust\nlet value =\n    42;\n```\n\n    indented();\n    still_indented();\n";
         let expected = "Before this code.\n\n```rust\nlet value =\n    42;\n```\n\n    indented();\n    still_indented();\n";
 
-        assert_eq!(unwrap_markdown(input), expected);
+        assert_eq!(unwrap(input), expected);
     }
 
     #[test]
@@ -550,7 +665,7 @@ mod tests {
         let input = "- A list item that was\n  wrapped across lines.\n- A sibling item.\n    - A nested item that is\n      wrapped too.\n\n1. An ordered item that\n   also wraps.\n2. Another item.\n";
         let expected = "- A list item that was wrapped across lines.\n- A sibling item.\n    - A nested item that is wrapped too.\n\n1. An ordered item that also wraps.\n2. Another item.\n";
 
-        assert_eq!(unwrap_markdown(input), expected);
+        assert_eq!(unwrap(input), expected);
     }
 
     #[test]
@@ -558,7 +673,7 @@ mod tests {
         let input = "> A quoted paragraph that\n> was wrapped.\n>\n> [!NOTE]\n> An alert paragraph that\n> was wrapped.\n";
         let expected = "> A quoted paragraph that was wrapped.\n>\n> [!NOTE]\n> An alert paragraph that was wrapped.\n";
 
-        assert_eq!(unwrap_markdown(input), expected);
+        assert_eq!(unwrap(input), expected);
     }
 
     #[test]
@@ -567,7 +682,7 @@ mod tests {
         let expected =
             "First line.  \nSecond line that can still unwrap.\n\nBackslash break.\\\nLast line.\n";
 
-        assert_eq!(unwrap_markdown(input), expected);
+        assert_eq!(unwrap(input), expected);
     }
 
     #[test]
@@ -575,7 +690,7 @@ mod tests {
         let input = "| Name | Meaning |\n| --- | --- |\n| wide-md | Unwraps text |\n\nA wrapped paragraph\nafter the table.\n";
         let expected = "| Name | Meaning |\n| --- | --- |\n| wide-md | Unwraps text |\n\nA wrapped paragraph after the table.\n";
 
-        assert_eq!(unwrap_markdown(input), expected);
+        assert_eq!(unwrap(input), expected);
     }
 
     #[test]
@@ -583,25 +698,65 @@ mod tests {
         let input = "---\ntitle: A document\ndescription: Kept\nas written\n---\n\n<div>\nraw lines\nstay separate\n</div>\n\n$$\na +\nb\n$$\n\nWrapped\nprose.\n";
         let expected = "---\ntitle: A document\ndescription: Kept\nas written\n---\n\n<div>\nraw lines\nstay separate\n</div>\n\n$$\na +\nb\n$$\n\nWrapped prose.\n";
 
-        assert_eq!(unwrap_markdown(input), expected);
+        assert_eq!(unwrap(input), expected);
+    }
+
+    #[test]
+    fn preserves_utf8_bom_around_default_and_width_formatting() {
+        let input = "\u{feff}---\ntitle: A document\ndescription: Kept\nas written\n---\n\nWrapped\nprose.\n";
+        let expected = "\u{feff}---\ntitle: A document\ndescription: Kept\nas written\n---\n\nWrapped prose.\n";
+
+        assert_eq!(unwrap(input), expected);
+        assert_eq!(unwrap("\u{feff}"), "\u{feff}");
+
+        let width_input =
+            "\u{feff}+++\r\ntitle = \"Test\"\r\n+++\r\n\r\nOne two three four five six.\r\n";
+        let width_expected =
+            "\u{feff}+++\r\ntitle = \"Test\"\r\n+++\r\n\r\nOne two three\r\nfour five six.\r\n";
+        assert_eq!(format_at_width(width_input, 14), width_expected);
+    }
+
+    #[test]
+    fn refuses_custom_containers_in_prose_containers() {
+        let fixtures = [
+            ("Before.\n\n:::note\nBody.\n:::\n", 3),
+            ("Before.\n\n> - :::note\n>   Body.\n>   :::\n", 3),
+            ("Term\n: :::note\n  Body.\n  :::\n", 2),
+            ("[^note]: :::note\n    Body.\n    :::\n", 1),
+        ];
+
+        for (input, line) in fixtures {
+            assert_eq!(
+                unwrap_markdown(input),
+                Err(FormatError::UnsupportedCustomContainer { line })
+            );
+        }
+    }
+
+    #[test]
+    fn permits_custom_container_markers_inside_literal_blocks() {
+        let input = "---\nexample: |\n  :::note\n---\n\n```text\n:::note\n```\n\n<div>\n:::note\n</div>\n\nWrapped\nprose.\n";
+        let expected = "---\nexample: |\n  :::note\n---\n\n```text\n:::note\n```\n\n<div>\n:::note\n</div>\n\nWrapped prose.\n";
+
+        assert_eq!(unwrap(input), expected);
     }
 
     #[test]
     fn retains_crlf_and_missing_final_newline() {
-        assert_eq!(unwrap_markdown("First\r\nsecond\r\n"), "First second\r\n");
-        assert_eq!(unwrap_markdown("First\nsecond"), "First second");
+        assert_eq!(unwrap("First\r\nsecond\r\n"), "First second\r\n");
+        assert_eq!(unwrap("First\nsecond"), "First second");
     }
 
     #[test]
     fn leaves_documents_without_soft_breaks_byte_identical() {
         let input = "# Already wide\r\n\r\n- one\r\n- two\r\n";
 
-        assert_eq!(unwrap_markdown(input), input);
+        assert_eq!(unwrap(input), input);
     }
 
     #[test]
     fn collapses_whitespace_at_a_soft_break() {
-        assert_eq!(unwrap_markdown("First \n   second\n"), "First second\n");
+        assert_eq!(unwrap("First \n   second\n"), "First second\n");
     }
 
     #[test]

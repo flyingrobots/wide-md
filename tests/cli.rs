@@ -59,6 +59,92 @@ fn reads_stdin_by_default_and_with_an_explicit_dash() {
 }
 
 #[test]
+fn preserves_utf8_bom_and_front_matter_while_formatting_prose() {
+    let directory = TempDir::new().expect("temporary directory should be created");
+    let path = directory.path().join("bom.md");
+    let input = "\u{feff}---\ntitle: Test\ndescription: two\n lines\n---\n\nWrapped\nprose.\n";
+    let expected = "\u{feff}---\ntitle: Test\ndescription: two\n lines\n---\n\nWrapped prose.\n";
+    write(&path, input);
+
+    let output = run(directory.path(), &["bom.md"], None);
+
+    assert!(output.status.success());
+    assert_eq!(
+        text(&output.stderr),
+        "wide-md: 1 changed, 0 unchanged, 0 failed\n"
+    );
+    assert_eq!(fs::read_to_string(&path).unwrap(), expected);
+
+    let check = run(directory.path(), &["--check", "bom.md"], None);
+    assert!(check.status.success());
+    assert_eq!(
+        text(&check.stderr),
+        "wide-md: 0 would change, 1 unchanged, 0 failed\n"
+    );
+}
+
+#[test]
+fn refuses_mdx_files_without_changing_them() {
+    let directory = TempDir::new().expect("temporary directory should be created");
+    let path = directory.path().join("component.mdx");
+    let input = "import Alpha from './alpha'\nexport const value = 1\n";
+    write(&path, input);
+
+    let output = run(directory.path(), &["component.mdx"], None);
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    assert!(text(&output.stderr).contains("component.mdx: MDX is not supported safely"));
+    assert!(text(&output.stderr).ends_with("wide-md: 0 changed, 0 unchanged, 1 failed\n"));
+    assert_eq!(fs::read_to_string(&path).unwrap(), input);
+
+    let stdout = run(
+        directory.path(),
+        &["--stdout", path.to_str().unwrap()],
+        None,
+    );
+    assert_eq!(stdout.status.code(), Some(2));
+    assert!(stdout.stdout.is_empty());
+    assert!(text(&stdout.stderr).contains("MDX is not supported safely"));
+    assert_eq!(fs::read_to_string(&path).unwrap(), input);
+
+    let discovered = run(directory.path(), &["--include=*.mdx", "."], None);
+    assert_eq!(discovered.status.code(), Some(2));
+    assert!(discovered.stdout.is_empty());
+    assert!(text(&discovered.stderr).contains("component.mdx: MDX is not supported safely"));
+    assert!(text(&discovered.stderr).ends_with("wide-md: 0 changed, 0 unchanged, 1 failed\n"));
+    assert_eq!(fs::read_to_string(path).unwrap(), input);
+}
+
+#[test]
+fn refuses_custom_containers_without_changing_the_file() {
+    let directory = TempDir::new().expect("temporary directory should be created");
+    let path = directory.path().join("container.md");
+    let input = ":::note\nA wrapped\ncontainer body.\n:::\n";
+    write(&path, input);
+
+    let output = run(directory.path(), &["container.md"], None);
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    assert!(
+        text(&output.stderr)
+            .contains("container.md: unsupported custom container syntax at line 1")
+    );
+    assert!(text(&output.stderr).ends_with("wide-md: 0 changed, 0 unchanged, 1 failed\n"));
+    assert_eq!(fs::read_to_string(&path).unwrap(), input);
+
+    let stdin = run(directory.path(), &[], Some(input));
+    assert_eq!(stdin.status.code(), Some(2));
+    assert!(stdin.stdout.is_empty());
+    assert_eq!(
+        text(&stdin.stderr),
+        "wide-md: unsupported custom container syntax at line 1; `:::` containers require a dialect-aware formatter\n"
+    );
+    assert_eq!(fs::read_to_string(path).unwrap(), input);
+}
+
+#[test]
 fn formats_mixed_files_and_directories_in_place_with_stable_summaries() {
     let directory = TempDir::new().expect("temporary directory should be created");
     write(directory.path().join("one.md"), "One narrow\nparagraph.\n");
@@ -176,10 +262,10 @@ fn include_adds_extensions_and_no_ignore_overrides_repository_ignores() {
     );
     write(directory.path().join("visible.md"), "Visible\ntext.\n");
     write(directory.path().join("ignored.md"), "Ignored\ntext.\n");
-    write(directory.path().join("note.mdx"), "MDX\ntext.\n");
+    write(directory.path().join("note.mkd"), "Included\ntext.\n");
     write(directory.path().join(".hidden.md"), "Hidden\ntext.\n");
 
-    let normal = run(directory.path(), &["--include=*.mdx", "."], None);
+    let normal = run(directory.path(), &["--include=*.mkd", "."], None);
 
     assert!(normal.status.success());
     assert_eq!(
@@ -191,8 +277,8 @@ fn include_adds_extensions_and_no_ignore_overrides_repository_ignores() {
         "Visible text.\n"
     );
     assert_eq!(
-        fs::read_to_string(directory.path().join("note.mdx")).unwrap(),
-        "MDX text.\n"
+        fs::read_to_string(directory.path().join("note.mkd")).unwrap(),
+        "Included text.\n"
     );
     assert_eq!(
         fs::read_to_string(directory.path().join("ignored.md")).unwrap(),
@@ -230,13 +316,13 @@ fn repository_config_supplies_width_includes_jobs_and_no_ignore() {
     write(directory.path().join(".gitignore"), "ignored.md\n");
     write(
         directory.path().join(".wide-md.toml"),
-        "width = 20\ninclude = [\"*.mdx\"]\njobs = 2\nno-ignore = true\n",
+        "width = 20\ninclude = [\"*.mkd\"]\njobs = 2\nno-ignore = true\n",
     );
     write(
         directory.path().join("configured.md"),
         "One two three four five six seven eight.\n",
     );
-    write(directory.path().join("extra.mdx"), "Extra narrow\ntext.\n");
+    write(directory.path().join("extra.mkd"), "Extra narrow\ntext.\n");
     write(
         directory.path().join("ignored.md"),
         "Ignored narrow\ntext.\n",
@@ -254,7 +340,7 @@ fn repository_config_supplies_width_includes_jobs_and_no_ignore() {
         "One two three four\nfive six seven\neight.\n"
     );
     assert_eq!(
-        fs::read_to_string(directory.path().join("extra.mdx")).unwrap(),
+        fs::read_to_string(directory.path().join("extra.mkd")).unwrap(),
         "Extra narrow text.\n"
     );
     assert_eq!(

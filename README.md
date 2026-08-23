@@ -2,7 +2,7 @@
 
 `wide-md` removes artificial hard wrapping from Markdown. It can act as a stdin/stdout filter, format individual files, or recursively format directories.
 
-The formatter uses a CommonMark parser to distinguish ordinary soft line breaks from syntax-significant newlines. Fenced and indented code, tables, headings, front matter, raw HTML, math, link definitions, explicit hard breaks, and other protected structures are left intact.
+The formatter uses `pulldown-cmark` with a built-in extended Markdown profile to distinguish ordinary soft line breaks from syntax-significant newlines. Covered structures such as fenced and indented code, tables, headings, front matter, raw HTML, math, link definitions, and explicit hard breaks are left intact. Known unsupported constructs are refused when they can be identified safely rather than guessed at as prose.
 
 ## Install
 
@@ -35,8 +35,10 @@ Directory traversal processes `.md` and `.markdown` files recursively. It respec
 Use `--include` to add other filename patterns. The flag can be repeated:
 
 ```console
-$ wide-md --include='*.mdx' --include='*.mkd' docs/
+$ wide-md --include='*.mkd' --include='*.mdown' docs/
 ```
+
+`--include` controls file discovery only; it does not add support for another Markdown dialect.
 
 Use `--no-ignore` to include hidden and ignored files while still excluding `.git` directories:
 
@@ -44,7 +46,17 @@ Use `--no-ignore` to include hidden and ignored files while still excluding `.gi
 $ wide-md --no-ignore docs/
 ```
 
-Explicit file arguments are processed regardless of their extension or ignore status.
+Explicit file arguments are processed regardless of their extension or ignore status, except that `.mdx` files are refused because MDX is not supported safely.
+
+## Input boundary
+
+Input must be UTF-8 Markdown. A leading UTF-8 byte-order mark is preserved byte-for-byte and excluded from parsing so that following front matter remains recognizable.
+
+MDX is not supported. Whenever an `.mdx` path reaches formatting—including through an explicit path, an include glob during directory traversal, or `--stdout`—it is refused. Standard input has no filename or dialect metadata and is treated as Markdown; do not pipe MDX into `wide-md`.
+
+Custom `:::` containers and directives are also not supported yet. When a `:::` marker begins a Markdown content line, including inside a blockquote or list item, `wide-md` exits with status 2 and leaves that file unchanged. Literal `:::` text inside front matter, code blocks, and raw HTML blocks remains allowed.
+
+These checks cover known unsafe boundaries; they are not automatic recognition of every Markdown-derived language. Preview unfamiliar dialects with `--diff` before using write mode.
 
 ## Width
 
@@ -99,7 +111,7 @@ Discovery and reporting remain deterministic regardless of the worker count.
 
 ```toml
 width = 120
-include = ["*.mdx", "*.mkd"]
+include = ["*.mkd", "*.mdown"]
 jobs = 4
 no-ignore = false
 ```
@@ -112,7 +124,9 @@ Unknown configuration keys, invalid globs, and zero values for `width` or `jobs`
 
 Changed files are written to temporary files in the same directory, flushed and synchronized, assigned the original file permissions, and atomically renamed over the originals. Files whose output is byte-identical are not rewritten. Atomic replacement preserves permissions but intentionally gives the changed file a new modification time; platform-specific extended attributes and hard-link identity are not promised.
 
-Path modes print only a final summary and errors to stderr, leaving stdout available for `--diff` and `--stdout`. Input must be UTF-8 Markdown.
+Processing is atomic per changed file, not across an entire multi-file invocation. If one file fails, another valid file may already have been changed before the command exits with status 2.
+
+Path modes print only a final summary and errors to stderr, leaving stdout available for `--diff` and `--stdout`.
 
 Exit statuses are:
 
@@ -120,7 +134,7 @@ Exit statuses are:
 |---:|---|
 | `0` | Formatting succeeded, a diff was produced successfully, or `--check` found no changes |
 | `1` | `--check` found files that would change |
-| `2` | Invalid usage, configuration failure, discovery failure, or file-processing failure |
+| `2` | Invalid usage, unsupported input, configuration failure, discovery failure, or file-processing failure |
 
 ## Example
 
