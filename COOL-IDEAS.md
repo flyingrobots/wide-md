@@ -1,6 +1,6 @@
 # COOL IDEAS for `wide-md`
 
-Status: living design backlog, not an implementation commitment. The initial assessment is anchored to `wide-md` commit `3f9597d` and to a real run against `/Users/james/git/blog/jim-component-ownership.md` on 2026-08-22. Shipped-safeguard status is reconciled through `52a599b` on 2026-08-23.
+Status: living design backlog, not an implementation commitment. The initial assessment is anchored to `wide-md` commit `3f9597d` and to a real run against the external article `jim-component-ownership.md` on 2026-08-22. Shipped-safeguard status is reconciled through `52a599b` on 2026-08-23.
 
 ## Short answer
 
@@ -234,7 +234,7 @@ Acceptance criteria:
 
 ### 7. Resolve configuration from the target, not accidentally from the shell
 
-Configuration is currently discovered only from the process current directory and its ancestors (`README.md#96@3f9597d`). An absolute file in another repository therefore receives the caller's configuration, not the target repository's. The real blog run had to execute with `/Users/james/git/blog` as the working directory to avoid this ambiguity.
+Configuration is currently discovered only from the process current directory and its ancestors (`README.md#96@3f9597d`). An absolute file in another repository therefore receives the caller's configuration, not the target repository's. The real blog run had to execute from the target blog repository to avoid this ambiguity.
 
 Recommended model:
 
