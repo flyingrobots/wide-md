@@ -1,5 +1,5 @@
 #[test]
-fn unreleased_changelog_records_fail_closed_formatter_contract() {
+fn changelog_records_fail_closed_formatter_contract() {
     let changelog = include_str!("../CHANGELOG.md");
 
     for required_notice in [
