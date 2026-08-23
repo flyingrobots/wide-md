@@ -1,0 +1,4 @@
+{
+  // wide-md intentionally stores prose paragraphs as single physical lines.
+  "MD013": false
+}
