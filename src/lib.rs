@@ -2,8 +2,10 @@
 
 pub mod cli;
 
+use std::borrow::Cow;
 use std::num::NonZeroUsize;
 use std::ops::Range;
+use std::{error, fmt};
 
 use pulldown_cmark::{Event, Options, Parser, Tag};
 use unicode_width::UnicodeWidthChar;
@@ -16,15 +18,48 @@ pub struct FormatOptions {
     pub width: Option<NonZeroUsize>,
 }
 
+/// A source construct that cannot be formatted safely by the built-in
+/// Markdown profile.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum FormatError {
+    /// A `:::` custom container marker outside a literal block.
+    UnsupportedCustomContainer { line: usize },
+}
+
+impl fmt::Display for FormatError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::UnsupportedCustomContainer { line } => write!(
+                formatter,
+                "unsupported custom container syntax at line {line}; `:::` containers require a dialect-aware formatter"
+            ),
+        }
+    }
+}
+
+impl error::Error for FormatError {}
+
 /// Formats Markdown by removing soft wrapping and, when requested, reflowing
-/// prose to a maximum source width.
-pub fn format_markdown(input: &str, options: FormatOptions) -> String {
-    let unwrapped = unwrap_markdown(input);
+/// prose to a maximum source width. A leading UTF-8 byte-order mark is
+/// preserved around the complete formatting pipeline.
+///
+/// # Errors
+///
+/// Returns [`FormatError`] when the source contains a known unsupported
+/// construct that the built-in Markdown profile cannot rewrite safely.
+pub fn format_markdown(input: &str, options: FormatOptions) -> Result<String, FormatError> {
+    let (body, has_bom) = split_bom(input);
+    reject_unsupported_syntax(body)?;
+
+    let unwrapped = unwrap_markdown_body(body);
     let Some(width) = options.width else {
-        return unwrapped;
+        return Ok(restore_bom(unwrapped, has_bom));
     };
 
-    reflow_markdown(&unwrapped, width.get())
+    Ok(restore_bom(
+        reflow_markdown(&unwrapped, width.get()),
+        has_bom,
+    ))
 }
 
 /// Removes soft line breaks from Markdown prose while leaving every other
@@ -33,11 +68,24 @@ pub fn format_markdown(input: &str, options: FormatOptions) -> String {
 /// Markdown's parser decides which newlines are soft breaks. Newlines that
 /// define block structure, fenced or indented code, tables, metadata, raw HTML,
 /// or explicit hard breaks are therefore preserved without bespoke rewriting.
-pub fn unwrap_markdown(input: &str) -> String {
+/// A leading UTF-8 byte-order mark is preserved and excluded from parsing.
+///
+/// # Errors
+///
+/// Returns [`FormatError`] when the source contains a known unsupported
+/// construct that the built-in Markdown profile cannot rewrite safely.
+pub fn unwrap_markdown(input: &str) -> Result<String, FormatError> {
+    let (body, has_bom) = split_bom(input);
+    reject_unsupported_syntax(body)?;
+    Ok(restore_bom(unwrap_markdown_body(body), has_bom))
+}
+
+fn unwrap_markdown_body(input: &str) -> String {
     let mut output = String::with_capacity(input.len());
     let mut copied_through = 0;
+    let parser_input = normalize_bare_cr_for_parser(input);
 
-    for (event, source) in Parser::new_ext(input, parser_options()).into_offset_iter() {
+    for (event, source) in Parser::new_ext(&parser_input, parser_options()).into_offset_iter() {
         if matches!(event, Event::SoftBreak) && !follows_gfm_alert_marker(input, source.start) {
             debug_assert!(source.start >= copied_through);
             output.push_str(&input[copied_through..source.start]);
@@ -57,25 +105,99 @@ pub fn unwrap_markdown(input: &str) -> String {
     output
 }
 
+fn split_bom(input: &str) -> (&str, bool) {
+    input
+        .strip_prefix('\u{feff}')
+        .map_or((input, false), |body| (body, true))
+}
+
+fn restore_bom(output: String, has_bom: bool) -> String {
+    if !has_bom {
+        return output;
+    }
+
+    let mut with_bom = String::with_capacity('\u{feff}'.len_utf8() + output.len());
+    with_bom.push('\u{feff}');
+    with_bom.push_str(&output);
+    with_bom
+}
+
+fn reject_unsupported_syntax(input: &str) -> Result<(), FormatError> {
+    if let Some(line) = custom_container_line(input) {
+        return Err(FormatError::UnsupportedCustomContainer { line });
+    }
+    Ok(())
+}
+
+fn custom_container_line(input: &str) -> Option<usize> {
+    let literal_ranges = literal_block_ranges(input);
+    let mut literal_cursor = 0;
+    let mut line_start = 0;
+    let mut line_number = 1;
+
+    while line_start < input.len() {
+        let (line_end, line_body_end, _) = source_line_bounds(input, line_start);
+        while literal_ranges
+            .get(literal_cursor)
+            .is_some_and(|range| range.end <= line_start)
+        {
+            literal_cursor += 1;
+        }
+        let is_literal = literal_ranges
+            .get(literal_cursor)
+            .is_some_and(|range| range.start < line_end && range.end > line_start);
+        let line = &input[line_start..line_body_end];
+
+        if !is_literal && line_starts_custom_container(line) {
+            return Some(line_number);
+        }
+        line_start = line_end;
+        line_number += 1;
+    }
+
+    None
+}
+
+fn literal_block_ranges(input: &str) -> Vec<Range<usize>> {
+    let parser_input = normalize_bare_cr_for_parser(input);
+    let ranges = Parser::new_ext(&parser_input, parser_options())
+        .into_offset_iter()
+        .filter_map(|(event, range)| match event {
+            Event::Start(Tag::CodeBlock(_) | Tag::HtmlBlock | Tag::MetadataBlock(_)) => Some(range),
+            _ => None,
+        })
+        .collect();
+    merge_ranges(ranges)
+}
+
+fn line_starts_custom_container(line: &str) -> bool {
+    let mut content = line;
+    loop {
+        let Some(parts) = wrapping_parts(content) else {
+            return false;
+        };
+        if parts.content.len() == content.len() {
+            break;
+        }
+        content = parts.content;
+    }
+
+    content.trim_start_matches([' ', '\t']).starts_with(":::")
+}
+
 fn reflow_markdown(input: &str, width: usize) -> String {
     let protected = protected_ranges(input);
-    let inserted_newline = if input.contains("\r\n") { "\r\n" } else { "\n" };
+    let (_, _, first_line_ending) = source_line_bounds(input, 0);
+    let inserted_newline = if first_line_ending.is_empty() {
+        "\n"
+    } else {
+        first_line_ending
+    };
     let mut output = String::with_capacity(input.len());
     let mut line_start = 0;
 
     while line_start < input.len() {
-        let (line_end, body_end, line_ending) = match input[line_start..].find('\n') {
-            Some(relative_end) => {
-                let line_end = line_start + relative_end + 1;
-                let lf = line_end - 1;
-                if lf > line_start && input.as_bytes()[lf - 1] == b'\r' {
-                    (line_end, lf - 1, "\r\n")
-                } else {
-                    (line_end, lf, "\n")
-                }
-            }
-            None => (input.len(), input.len(), ""),
-        };
+        let (line_end, body_end, line_ending) = source_line_bounds(input, line_start);
 
         let body = &input[line_start..body_end];
         let is_protected = protected
@@ -100,7 +222,8 @@ fn reflow_markdown(input: &str, width: usize) -> String {
 }
 
 fn protected_ranges(input: &str) -> Vec<Range<usize>> {
-    let parser = Parser::new_ext(input, parser_options());
+    let parser_input = normalize_bare_cr_for_parser(input);
+    let parser = Parser::new_ext(&parser_input, parser_options());
     let mut ranges: Vec<_> = parser
         .reference_definitions()
         .iter()
@@ -125,6 +248,10 @@ fn protected_ranges(input: &str) -> Vec<Range<usize>> {
         }
     }
 
+    merge_ranges(ranges)
+}
+
+fn merge_ranges(mut ranges: Vec<Range<usize>>) -> Vec<Range<usize>> {
     ranges.sort_by_key(|range| range.start);
     let mut merged: Vec<Range<usize>> = Vec::with_capacity(ranges.len());
     for range in ranges {
@@ -137,6 +264,49 @@ fn protected_ranges(input: &str) -> Vec<Range<usize>> {
         }
     }
     merged
+}
+
+fn normalize_bare_cr_for_parser(input: &str) -> Cow<'_, str> {
+    if !input
+        .match_indices('\r')
+        .any(|(index, _)| input.as_bytes().get(index + 1) != Some(&b'\n'))
+    {
+        return Cow::Borrowed(input);
+    }
+
+    // Replacing one ASCII byte with another keeps every parser source offset
+    // aligned with the original text used for byte-preserving edits.
+    let mut normalized = String::with_capacity(input.len());
+    let mut copied_through = 0;
+
+    for (index, _) in input.match_indices('\r') {
+        if input.as_bytes().get(index + 1) == Some(&b'\n') {
+            continue;
+        }
+        normalized.push_str(&input[copied_through..index]);
+        normalized.push('\n');
+        copied_through = index + 1;
+    }
+
+    normalized.push_str(&input[copied_through..]);
+    Cow::Owned(normalized)
+}
+
+fn source_line_bounds(input: &str, line_start: usize) -> (usize, usize, &str) {
+    let bytes = input.as_bytes();
+    let body_end = bytes[line_start..]
+        .iter()
+        .position(|byte| matches!(byte, b'\r' | b'\n'))
+        .map_or(input.len(), |offset| line_start + offset);
+    let line_end = if body_end == input.len() {
+        body_end
+    } else if bytes[body_end] == b'\r' && bytes.get(body_end + 1) == Some(&b'\n') {
+        body_end + 2
+    } else {
+        body_end + 1
+    };
+
+    (line_end, body_end, &input[body_end..line_end])
 }
 
 fn wrap_source_line(body: &str, line_ending: &str, inserted_newline: &str, width: usize) -> String {
@@ -510,7 +680,11 @@ fn parser_options() -> Options {
 mod tests {
     use std::num::NonZeroUsize;
 
-    use super::{FormatOptions, format_markdown, unwrap_markdown};
+    use super::{FormatError, FormatOptions, format_markdown, unwrap_markdown};
+
+    fn unwrap(input: &str) -> String {
+        unwrap_markdown(input).expect("test input should use supported Markdown syntax")
+    }
 
     fn format_at_width(input: &str, width: usize) -> String {
         format_markdown(
@@ -519,6 +693,7 @@ mod tests {
                 width: NonZeroUsize::new(width),
             },
         )
+        .expect("test input should use supported Markdown syntax")
     }
 
     #[test]
@@ -526,7 +701,7 @@ mod tests {
         let input = "This paragraph was wrapped at\neighty columns and should become\none physical line.\n\nAnother paragraph.\n";
         let expected = "This paragraph was wrapped at eighty columns and should become one physical line.\n\nAnother paragraph.\n";
 
-        assert_eq!(unwrap_markdown(input), expected);
+        assert_eq!(unwrap(input), expected);
     }
 
     #[test]
@@ -534,7 +709,7 @@ mod tests {
         let input = "# Heading\n\nA wrapped setext\nheading\n=======\n\n---\n\nText\n";
         let expected = "# Heading\n\nA wrapped setext heading\n=======\n\n---\n\nText\n";
 
-        assert_eq!(unwrap_markdown(input), expected);
+        assert_eq!(unwrap(input), expected);
     }
 
     #[test]
@@ -542,7 +717,7 @@ mod tests {
         let input = "Before this\ncode.\n\n```rust\nlet value =\n    42;\n```\n\n    indented();\n    still_indented();\n";
         let expected = "Before this code.\n\n```rust\nlet value =\n    42;\n```\n\n    indented();\n    still_indented();\n";
 
-        assert_eq!(unwrap_markdown(input), expected);
+        assert_eq!(unwrap(input), expected);
     }
 
     #[test]
@@ -550,7 +725,7 @@ mod tests {
         let input = "- A list item that was\n  wrapped across lines.\n- A sibling item.\n    - A nested item that is\n      wrapped too.\n\n1. An ordered item that\n   also wraps.\n2. Another item.\n";
         let expected = "- A list item that was wrapped across lines.\n- A sibling item.\n    - A nested item that is wrapped too.\n\n1. An ordered item that also wraps.\n2. Another item.\n";
 
-        assert_eq!(unwrap_markdown(input), expected);
+        assert_eq!(unwrap(input), expected);
     }
 
     #[test]
@@ -558,7 +733,7 @@ mod tests {
         let input = "> A quoted paragraph that\n> was wrapped.\n>\n> [!NOTE]\n> An alert paragraph that\n> was wrapped.\n";
         let expected = "> A quoted paragraph that was wrapped.\n>\n> [!NOTE]\n> An alert paragraph that was wrapped.\n";
 
-        assert_eq!(unwrap_markdown(input), expected);
+        assert_eq!(unwrap(input), expected);
     }
 
     #[test]
@@ -567,7 +742,7 @@ mod tests {
         let expected =
             "First line.  \nSecond line that can still unwrap.\n\nBackslash break.\\\nLast line.\n";
 
-        assert_eq!(unwrap_markdown(input), expected);
+        assert_eq!(unwrap(input), expected);
     }
 
     #[test]
@@ -575,7 +750,7 @@ mod tests {
         let input = "| Name | Meaning |\n| --- | --- |\n| wide-md | Unwraps text |\n\nA wrapped paragraph\nafter the table.\n";
         let expected = "| Name | Meaning |\n| --- | --- |\n| wide-md | Unwraps text |\n\nA wrapped paragraph after the table.\n";
 
-        assert_eq!(unwrap_markdown(input), expected);
+        assert_eq!(unwrap(input), expected);
     }
 
     #[test]
@@ -583,25 +758,78 @@ mod tests {
         let input = "---\ntitle: A document\ndescription: Kept\nas written\n---\n\n<div>\nraw lines\nstay separate\n</div>\n\n$$\na +\nb\n$$\n\nWrapped\nprose.\n";
         let expected = "---\ntitle: A document\ndescription: Kept\nas written\n---\n\n<div>\nraw lines\nstay separate\n</div>\n\n$$\na +\nb\n$$\n\nWrapped prose.\n";
 
-        assert_eq!(unwrap_markdown(input), expected);
+        assert_eq!(unwrap(input), expected);
+    }
+
+    #[test]
+    fn preserves_utf8_bom_around_default_and_width_formatting() {
+        let input = "\u{feff}---\ntitle: A document\ndescription: Kept\nas written\n---\n\nWrapped\nprose.\n";
+        let expected = "\u{feff}---\ntitle: A document\ndescription: Kept\nas written\n---\n\nWrapped prose.\n";
+
+        assert_eq!(unwrap(input), expected);
+        assert_eq!(unwrap("\u{feff}"), "\u{feff}");
+
+        let width_input =
+            "\u{feff}+++\r\ntitle = \"Test\"\r\n+++\r\n\r\nOne two three four five six.\r\n";
+        let width_expected =
+            "\u{feff}+++\r\ntitle = \"Test\"\r\n+++\r\n\r\nOne two three\r\nfour five six.\r\n";
+        assert_eq!(format_at_width(width_input, 14), width_expected);
+    }
+
+    #[test]
+    fn refuses_custom_containers_in_prose_containers() {
+        let fixtures = [
+            ("Before.\n\n:::note\nBody.\n:::\n", 3),
+            ("Before.\n\n> - :::note\n>   Body.\n>   :::\n", 3),
+            ("- - :::note\n    Wrapped\n    body.\n", 1),
+            ("Term\n: :::note\n  Body.\n  :::\n", 2),
+            ("[^note]: :::note\n    Body.\n    :::\n", 1),
+            ("Before.\r\r:::note\rBody.\r:::\r", 3),
+        ];
+
+        for (input, line) in fixtures {
+            assert_eq!(
+                unwrap_markdown(input),
+                Err(FormatError::UnsupportedCustomContainer { line })
+            );
+        }
+    }
+
+    #[test]
+    fn permits_custom_container_markers_inside_literal_blocks() {
+        let input = "---\nexample: |\n  :::note\n---\n\n```text\n:::note\n```\n\n<div>\n:::note\n</div>\n\nWrapped\nprose.\n";
+        let expected = "---\nexample: |\n  :::note\n---\n\n```text\n:::note\n```\n\n<div>\n:::note\n</div>\n\nWrapped prose.\n";
+
+        assert_eq!(unwrap(input), expected);
     }
 
     #[test]
     fn retains_crlf_and_missing_final_newline() {
-        assert_eq!(unwrap_markdown("First\r\nsecond\r\n"), "First second\r\n");
-        assert_eq!(unwrap_markdown("First\nsecond"), "First second");
+        assert_eq!(unwrap("First\r\nsecond\r\n"), "First second\r\n");
+        assert_eq!(unwrap("First\nsecond"), "First second");
+    }
+
+    #[test]
+    fn preserves_bare_cr_during_width_reflow() {
+        let input = "# Heading\r\r- Alpha beta gamma\r  delta epsilon.\r- Second item.\r";
+        let expected =
+            "# Heading\r\r- Alpha beta\r  gamma\r  delta\r  epsilon.\r- Second\r  item.\r";
+
+        let formatted = format_at_width(input, 12);
+        assert_eq!(formatted, expected);
+        assert_eq!(format_at_width(&formatted, 12), expected);
     }
 
     #[test]
     fn leaves_documents_without_soft_breaks_byte_identical() {
         let input = "# Already wide\r\n\r\n- one\r\n- two\r\n";
 
-        assert_eq!(unwrap_markdown(input), input);
+        assert_eq!(unwrap(input), input);
     }
 
     #[test]
     fn collapses_whitespace_at_a_soft_break() {
-        assert_eq!(unwrap_markdown("First \n   second\n"), "First second\n");
+        assert_eq!(unwrap("First \n   second\n"), "First second\n");
     }
 
     #[test]

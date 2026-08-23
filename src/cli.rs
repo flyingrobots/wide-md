@@ -51,7 +51,7 @@ pub struct Cli {
     #[arg(long)]
     no_ignore: bool,
 
-    /// Include an additional file glob while traversing directories
+    /// Include an additional Markdown filename glob; discovery only
     #[arg(long, value_name = "GLOB", action = clap::ArgAction::Append)]
     include: Vec<String>,
 
@@ -59,7 +59,7 @@ pub struct Cli {
     #[arg(long, value_name = "N", value_parser = parse_positive)]
     jobs: Option<NonZeroUsize>,
 
-    /// Markdown files and directories; use - for explicit stdin
+    /// Markdown files and directories; use - for explicit stdin; MDX is unsupported
     #[arg(value_name = "PATH", value_hint = ValueHint::AnyPath)]
     paths: Vec<PathBuf>,
 }
@@ -275,19 +275,29 @@ fn run_stdin(width: Option<NonZeroUsize>) -> Result<i32, Failure> {
     io::stdin().read_to_string(&mut input).map_err(|error| {
         Failure::message(format!("cannot read stdin as UTF-8 Markdown: {error}"))
     })?;
-    write_stdout(format_markdown(&input, FormatOptions { width }).as_bytes())?;
+    let formatted = format_markdown(&input, FormatOptions { width })
+        .map_err(|error| Failure::message(error.to_string()))?;
+    write_stdout(formatted.as_bytes())?;
     Ok(0)
 }
 
 fn run_stdout_file(path: &Path, width: Option<NonZeroUsize>) -> Result<i32, Failure> {
     ensure_regular_file(path)?;
+    if is_mdx(path) {
+        return Err(Failure::message(format!(
+            "{}: {UNSUPPORTED_MDX}",
+            path.display()
+        )));
+    }
     let input = fs::read_to_string(path).map_err(|error| {
         Failure::message(format!(
             "cannot read {} as UTF-8 Markdown: {error}",
             path.display()
         ))
     })?;
-    write_stdout(format_markdown(&input, FormatOptions { width }).as_bytes())?;
+    let formatted = format_markdown(&input, FormatOptions { width })
+        .map_err(|error| Failure::message(format!("{}: {error}", path.display())))?;
+    write_stdout(formatted.as_bytes())?;
     Ok(0)
 }
 
@@ -510,6 +520,18 @@ fn is_default_markdown(path: &Path) -> bool {
         })
 }
 
+const UNSUPPORTED_MDX: &str = "MDX is not supported safely; use a dialect-aware formatter";
+
+fn is_mdx(path: &Path) -> bool {
+    path.file_name()
+        .and_then(OsStr::to_str)
+        .is_some_and(|file_name| file_name.eq_ignore_ascii_case(".mdx"))
+        || path
+            .extension()
+            .and_then(OsStr::to_str)
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("mdx"))
+}
+
 fn normalize_absolute(path: &Path, current_dir: &Path) -> PathBuf {
     let absolute = if path.is_absolute() {
         path.to_owned()
@@ -578,10 +600,14 @@ fn process_file(
         if !metadata.is_file() {
             return Err("not a regular file".to_owned());
         }
+        if is_mdx(path) {
+            return Err(UNSUPPORTED_MDX.to_owned());
+        }
 
         let input = fs::read_to_string(path)
             .map_err(|error| format!("cannot read as UTF-8 Markdown: {error}"))?;
-        let formatted = format_markdown(&input, FormatOptions { width });
+        let formatted =
+            format_markdown(&input, FormatOptions { width }).map_err(|error| error.to_string())?;
         if formatted == input {
             return Ok(FileState::Unchanged);
         }
