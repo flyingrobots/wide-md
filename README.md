@@ -9,7 +9,7 @@ The formatter uses `pulldown-cmark` with a built-in extended Markdown profile to
 With a Rust toolchain installed:
 
 ```console
-$ cargo install --path .
+cargo install --path .
 ```
 
 ## Usage
@@ -17,17 +17,17 @@ $ cargo install --path .
 With no path arguments, `wide-md` retains its original filter behavior:
 
 ```console
-$ wide-md < narrow.md > wide.md
-$ cat narrow.md | wide-md
-$ cat narrow.md | wide-md -
+wide-md < narrow.md > wide.md
+cat narrow.md | wide-md
+cat narrow.md | wide-md -
 ```
 
 File and directory arguments are formatted in place:
 
 ```console
-$ wide-md README.md
-$ wide-md README.md CHANGELOG.md docs/
-$ wide-md docs/
+wide-md README.md
+wide-md README.md CHANGELOG.md docs/
+wide-md docs/
 ```
 
 Directory traversal processes `.md` and `.markdown` files recursively. It respects hidden-file rules, `.ignore`, `.gitignore`, global Git ignores, and repository excludes. Symlinks are never followed, and `.git` directories are always skipped.
@@ -35,7 +35,7 @@ Directory traversal processes `.md` and `.markdown` files recursively. It respec
 Use `--include` to add other filename patterns. The flag can be repeated:
 
 ```console
-$ wide-md --include='*.mkd' --include='*.mdown' docs/
+wide-md --include='*.mkd' --include='*.mdown' docs/
 ```
 
 `--include` controls file discovery only; it does not add support for another Markdown dialect.
@@ -43,7 +43,7 @@ $ wide-md --include='*.mkd' --include='*.mdown' docs/
 Use `--no-ignore` to include hidden and ignored files while still excluding `.git` directories:
 
 ```console
-$ wide-md --no-ignore docs/
+wide-md --no-ignore docs/
 ```
 
 Explicit file arguments are processed regardless of their extension or ignore status, except that `.mdx` files are refused because MDX is not supported safely.
@@ -67,7 +67,7 @@ Without `--width`, every parser-identified soft break is removed, leaving one ph
 With `--width`, prose is first unwrapped and then reflowed to the requested number of Unicode display columns:
 
 ```console
-$ wide-md --width=120 README.md docs/
+wide-md --width=120 README.md docs/
 ```
 
 List and blockquote prefixes are reproduced on continuation lines. Individual words, URLs, inline code spans, and inline links are not split; one of those tokens may therefore exceed the requested width. Protected Markdown structures are never reflowed merely to satisfy the width.
@@ -77,7 +77,7 @@ List and blockquote prefixes are reproduced on continuation lines. Individual wo
 Check files without changing them:
 
 ```console
-$ wide-md --check .
+wide-md --check .
 ```
 
 `--check` exits with status 1 when any file would change, making it suitable for CI.
@@ -85,14 +85,14 @@ $ wide-md --check .
 Preview unified diffs without changing files:
 
 ```console
-$ wide-md --diff README.md docs/
+wide-md --diff README.md docs/
 ```
 
 Format one file to stdout without changing it:
 
 ```console
-$ wide-md --stdout README.md
-$ wide-md --width=120 --stdout README.md > README.preview.md
+wide-md --stdout README.md
+wide-md --width=120 --stdout README.md > README.preview.md
 ```
 
 `--check`, `--diff`, and `--stdout` are mutually exclusive. Standard input (`-`) cannot be mixed with filesystem paths because there is no unambiguous multi-document stdout representation.
@@ -102,7 +102,7 @@ $ wide-md --width=120 --stdout README.md > README.preview.md
 Filesystem paths are processed in parallel. Set an explicit worker count when useful:
 
 ```console
-$ wide-md --jobs=4 docs/
+wide-md --jobs=4 docs/
 ```
 
 Discovery and reporting remain deterministic regardless of the worker count.
