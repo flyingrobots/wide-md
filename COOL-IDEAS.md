@@ -1,12 +1,12 @@
 # COOL IDEAS for `wide-md`
 
-Status: design backlog, not an implementation commitment. This assessment is anchored to `wide-md` commit `3f9597d` and to a real run against `/Users/james/git/blog/jim-component-ownership.md` on 2026-08-22.
+Status: living design backlog, not an implementation commitment. The initial assessment is anchored to `wide-md` commit `3f9597d` and to a real run against `/Users/james/git/blog/jim-component-ownership.md` on 2026-08-22. Shipped-safeguard status is reconciled through `52a599b` on 2026-08-23.
 
 ## Short answer
 
 The core idea is good and should stay small: let a Markdown parser identify actual soft breaks, remove those breaks, and leave syntax-significant source alone. The current stdin filter, file and directory modes, ignore handling, deterministic reporting, idempotence, and same-directory atomic replacement already make a strong foundation.
 
-The next work should be about **trust before reach**. Before adding more syntaxes or integrations, `wide-md` should fail closed when it cannot prove that a rewrite preserves the selected Markdown dialect. Two exploratory probes found source-corrupting cases today: a UTF-8 BOM prevents front matter recognition, and advertised `*.mdx` inclusion can merge separate ESM statements. Custom `:::` containers can also be flattened. Those are more important than convenience flags.
+The next work should remain about **trust before reach**. The baseline probes at `3f9597d` found three source-corrupting cases: a UTF-8 BOM defeated front-matter recognition, advertised `*.mdx` inclusion merged separate ESM statements, and custom `:::` containers were flattened. Those immediate hazards are now closed: BOMs are preserved, filename-bearing MDX input is refused, and custom containers outside parser-recognized literal blocks are refused. Multi-file preflight, semantic equivalence, and compare-before-replace protection remain more important than convenience flags.
 
 My proposed product contract is:
 
@@ -14,13 +14,20 @@ My proposed product contract is:
 
 ## Recommended order
 
-1. **P0 — Close known correctness holes:** BOM-aware front matter, honest MDX handling, custom-container safety, multi-file preflight, and compare-before-replace race protection.
+1. **P0 — Close the remaining correctness holes:** multi-file preflight and compare-before-replace race protection.
 2. **P0 — Add a semantic safety gate:** canonical parser-event equivalence around every proposed rewrite, calibrated by behavior-breaking mutations.
 3. **P1 — Make decisions inspectable:** config provenance, per-file config resolution, `--explain`, changed-path output, transformation statistics, and stable JSON reports.
 4. **P1 — Give authors escape hatches:** ignore-next and off/on regions for intentional source lineation or unsupported embedded syntax.
 5. **P1 — Harden writes and portability:** hard-link detection, metadata policy, fault injection, and macOS/Linux/Windows tests.
 6. **P2 — Improve width mode:** parser-derived inline atoms, reference-link/image handling, grapheme-aware width, real tab stops, and explicit newline policy.
 7. **P2 — Package the tool:** CI, release binaries, checksums, Homebrew/Cargo installation, pre-commit, and editor integration.
+
+Shipped safety baseline:
+
+- `e15d3d6` made both public formatting entry points return `Result<String, FormatError>`, preserved a leading BOM around parsing and rewriting, rejected filename-bearing `.mdx` input, and refused `:::` markers outside recognized literal blocks.
+- `2692a98` made literal-block exclusion linear instead of rescanning every parser range for every source line.
+- `cac28a1` closed nested-container, bare-CR container, and exact-dotfile `.mdx` evasions.
+- `52a599b` aligned parser and width-reflow handling for bare-CR line endings without changing source-offset correspondence.
 
 ## What already works well and should remain
 
@@ -51,11 +58,11 @@ That validates the central behavior, but it also exposes an important product tr
 
 The shell's whitespace-delimited word count also fell by eight. That metric counts standalone Markdown container markers as words, and repeated blockquote markers can disappear when continuation lines are joined, so the count is not a semantic-word invariant. A transformation report would show the exact reasons instead of leaving the user to infer them.
 
-## P0: known correctness and data-safety gaps
+## P0: shipped safety baseline and remaining gaps
 
-### 1. Preserve or reject a UTF-8 BOM before parsing
+### 1. Preserve a UTF-8 BOM before parsing — shipped
 
-Confirmed probe:
+Historical probe at `3f9597d`:
 
 ```markdown
 <UTF-8 BOM>---
@@ -65,53 +72,53 @@ description: two
 ---
 ```
 
-Current output begins like this:
+Historical output at `3f9597d` began like this:
 
 ```markdown
 <UTF-8 BOM>--- title: Test description: two lines
 ---
 ```
 
-The BOM prevents the opening delimiter from being recognized as YAML metadata, so parser-identified soft breaks flatten the front matter. This violates the current documentation's claim that front matter is preserved.
+At that baseline, the BOM prevented the opening delimiter from being recognized as YAML metadata, so parser-identified soft breaks flattened the front matter.
 
-Recommended behavior:
+Shipped behavior:
 
-- Detect `EF BB BF` before parsing.
-- Either parse the document body without the BOM and restore the BOM byte-for-byte, or refuse BOM-bearing input with a precise diagnostic. Preserving it is friendlier and should be straightforward.
-- Test YAML `---` metadata, `+++` metadata, an ordinary document, CRLF, and a BOM-only or empty document.
-- Ensure a no-op run remains byte-identical, including the BOM.
-- Consider rejecting other leading control characters or NUL bytes explicitly instead of sending ambiguous input through the parser.
+- `e15d3d6` detects a leading `EF BB BF`, parses the body without it, and restores it byte-for-byte around both default and width formatting.
+- Focused tests cover YAML and plus-delimited metadata, ordinary Markdown, CRLF, and BOM-only input.
+- No-op output remains byte-identical, including the BOM.
 
-Acceptance criterion: no supported metadata block can become prose solely because an encoding marker precedes it.
+The original acceptance criterion is met: no supported metadata block becomes prose solely because a leading UTF-8 BOM precedes it. Explicit policy for other leading control characters or NUL bytes remains separate hardening work.
 
-### 2. Stop implying that filename inclusion equals dialect support
+### 2. Keep filename inclusion separate from dialect support — refusal shipped
 
-The README currently demonstrates:
+The README at `3f9597d` demonstrated:
 
 ```console
 $ wide-md --include='*.mdx' --include='*.mkd' docs/
 ```
 
-`--include` only changes discovery. It does not add an MDX parser or protect MDX ESM and expression syntax. Confirmed probe:
+`--include` only changes discovery. It does not add an MDX parser or protect MDX ESM and expression syntax. Historical probe at `3f9597d`:
 
 ```mdx
 import Alpha from './alpha'
 export const value = 1
 ```
 
-Current output:
+Historical output at `3f9597d`:
 
 ```mdx
 import Alpha from './alpha' export const value = 1
 ```
 
-That output is invalid JavaScript/MDX. The existing `starts_with("import ")` and `starts_with("export ")` checks run during width reflow, but formatting always unwraps first (`src/lib.rs#21@3f9597d` and `src/lib.rs#329@3f9597d`), so the protection arrives too late.
+That historical output was invalid JavaScript/MDX. The baseline `starts_with("import ")` and `starts_with("export ")` checks ran during width reflow, but formatting unwrapped first (`src/lib.rs#21@3f9597d` and `src/lib.rs#329@3f9597d`), so the protection arrived too late.
 
-Immediate safe change:
+Shipped behavior:
 
-- Remove `*.mdx` from the README example until MDX has an executable support contract.
-- If the input extension is `.mdx`, refuse it by default with `MDX is not yet supported safely`; do this even for an explicit path.
-- If an expert escape hatch is desired, name it honestly, such as `--dialect=commonmark --allow-unknown-extension`, rather than treating `--include` as consent to semantic risk.
+- `e15d3d6` removed `*.mdx` from the README example and refuses extension-bearing MDX in explicit, discovered, and `--stdout` paths before formatting.
+- `cac28a1` also refuses the filename that is exactly `.mdx`, for which `Path::extension()` is absent.
+- CLI tests prove rejected files remain byte-identical and exit with status 2.
+
+If an expert escape hatch is ever desired, name it honestly, such as `--dialect=commonmark --allow-unknown-extension`, rather than treating `--include` as consent to semantic risk.
 
 Long-term support options:
 
@@ -120,11 +127,11 @@ Long-term support options:
 
 Do not grow an open-ended list of line-prefix heuristics. Multiline ESM, comments, strings, braces, TypeScript syntax, and JSX expression bodies make that approach impossible to close convincingly.
 
-Acceptance criterion: the documentation never presents a syntax as supported unless the test corpus contains its structural constructs and the semantic guard understands them.
+The refusal-side acceptance criterion is met for filename-bearing MDX: documentation does not present it as supported, and the CLI refuses it. Actual MDX support remains open and requires a dialect-aware frontend plus structural fixtures.
 
-### 3. Treat custom containers and directives as a dialect, not prose
+### 3. Treat custom containers and directives as a dialect, not prose — refusal shipped
 
-Confirmed probe:
+Historical probe at `3f9597d`:
 
 ```markdown
 :::note
@@ -133,24 +140,22 @@ container body.
 :::
 ```
 
-Current output:
+Historical output at `3f9597d`:
 
 ```markdown
 :::note A wrapped container body.
 :::
 ```
 
-The opening fence and body are merged. As with MDX statements, the `:::` width guard runs after the destructive unwrapping pass.
+At that baseline, the opening fence and body were merged because the `:::` width guard ran after the destructive unwrapping pass.
 
-Recommended behavior:
+Shipped behavior:
 
-- In the default CommonMark/GFM profile, refuse an unrecognized colon-fence construct or leave its entire containing block byte-identical and emit a warning.
-- Add named profiles only for syntaxes with fixtures and clear grammars: for example, MyST, MkDocs, or VitePress containers. Their rules are not necessarily interchangeable.
-- Protect complete opener/body/closer ranges before removing any soft breaks.
-- Detect unterminated containers and fail closed.
-- Include nested containers, titled containers, attributes, indentation, blockquotes, and fenced code inside containers in the corpus.
+- `e15d3d6` preflights `:::` markers before unwrapping and returns `FormatError::UnsupportedCustomContainer` outside parser-recognized metadata, code, and raw HTML blocks.
+- `2692a98` keeps the preflight linear in source lines plus merged literal ranges.
+- `cac28a1` closes nested list, definition-list, footnote, blockquote, and bare-CR evasions, with focused regressions.
 
-Acceptance criterion: an unsupported extension construct is never silently treated as ordinary prose merely because the base Markdown parser does not recognize it.
+The default-profile acceptance criterion is met for recognized `:::` markers: they are refused rather than treated as prose. Named MyST, MkDocs, or VitePress support remains open; those grammars need complete opener/body/closer fixtures, nesting rules, attributes, and unterminated-container behavior before admission.
 
 ### 4. Verify semantic equivalence before every write
 
@@ -588,7 +593,7 @@ Do not promise a platform until its atomic replacement and metadata behavior are
 
 ### 27. Stabilize the library around edits and diagnostics
 
-The current library returns only a `String`. A richer but still small API would unlock the CLI, editors, WASM, and independent verification without duplicating logic:
+The current `format_markdown` and `unwrap_markdown` entry points return `Result<String, FormatError>`, so known unsupported syntax is explicit. A richer but still small success value would unlock structured edits, diagnostics, equivalence evidence, editors, and WASM without duplicating logic:
 
 ```rust
 pub struct FormatRequest<'a> {
@@ -700,15 +705,15 @@ An issue template should request version, platform, effective config, dialect, m
 
 ### Milestone 0.1.1 — Honest and fail-closed
 
-- Preserve BOM-bearing Markdown/front matter or reject it safely.
-- Remove the MDX include example and refuse `.mdx` until supported.
-- Protect/refuse `:::` containers before unwrapping.
-- Correct the README's dialect and support claims.
-- Preflight all discovery/read/verification failures before any write.
-- Compare source identity/content immediately before replacement.
-- Add regression fixtures for every confirmed probe.
+- [x] Preserve BOM-bearing Markdown and front matter.
+- [x] Remove the MDX include example and refuse `.mdx` until supported.
+- [x] Refuse `:::` containers before unwrapping.
+- [x] Correct the README's dialect and support claims.
+- [ ] Preflight all discovery/read/verification failures before any write.
+- [ ] Compare source identity/content immediately before replacement.
+- [x] Add regression fixtures for every confirmed corruption probe.
 
-Done means none of the confirmed examples can be silently corrupted, and a mixed-validity batch leaves every file unchanged by default.
+The confirmed single-file corruption examples are closed. The milestone remains open until a mixed-validity batch leaves every file unchanged by default and compare-before-replace protection is explicit.
 
 ### Milestone 0.2 — Inspectable trust
 
