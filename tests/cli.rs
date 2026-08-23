@@ -89,6 +89,8 @@ fn refuses_mdx_files_without_changing_them() {
     let path = directory.path().join("component.mdx");
     let input = "import Alpha from './alpha'\nexport const value = 1\n";
     write(&path, input);
+    let dotfile = directory.path().join(".mdx");
+    write(&dotfile, input);
 
     let output = run(directory.path(), &["component.mdx"], None);
 
@@ -114,6 +116,12 @@ fn refuses_mdx_files_without_changing_them() {
     assert!(text(&discovered.stderr).contains("component.mdx: MDX is not supported safely"));
     assert!(text(&discovered.stderr).ends_with("wide-md: 0 changed, 0 unchanged, 1 failed\n"));
     assert_eq!(fs::read_to_string(path).unwrap(), input);
+
+    let dotfile_output = run(directory.path(), &[".mdx"], None);
+    assert_eq!(dotfile_output.status.code(), Some(2));
+    assert!(dotfile_output.stdout.is_empty());
+    assert!(text(&dotfile_output.stderr).contains(".mdx: MDX is not supported safely"));
+    assert_eq!(fs::read_to_string(dotfile).unwrap(), input);
 }
 
 #[test]

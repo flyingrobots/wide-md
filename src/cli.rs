@@ -523,9 +523,13 @@ fn is_default_markdown(path: &Path) -> bool {
 const UNSUPPORTED_MDX: &str = "MDX is not supported safely; use a dialect-aware formatter";
 
 fn is_mdx(path: &Path) -> bool {
-    path.extension()
+    path.file_name()
         .and_then(OsStr::to_str)
-        .is_some_and(|extension| extension.eq_ignore_ascii_case("mdx"))
+        .is_some_and(|file_name| file_name.eq_ignore_ascii_case(".mdx"))
+        || path
+            .extension()
+            .and_then(OsStr::to_str)
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("mdx"))
 }
 
 fn normalize_absolute(path: &Path, current_dir: &Path) -> PathBuf {

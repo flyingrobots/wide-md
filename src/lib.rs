@@ -131,9 +131,21 @@ fn custom_container_line(input: &str) -> Option<usize> {
     let literal_ranges = literal_block_ranges(input);
     let mut literal_cursor = 0;
     let mut line_start = 0;
+    let mut line_number = 1;
+    let bytes = input.as_bytes();
 
-    for (line_index, source_line) in input.split_inclusive('\n').enumerate() {
-        let line_end = line_start + source_line.len();
+    while line_start < input.len() {
+        let line_body_end = bytes[line_start..]
+            .iter()
+            .position(|byte| matches!(byte, b'\r' | b'\n'))
+            .map_or(input.len(), |offset| line_start + offset);
+        let line_end = if line_body_end == input.len() {
+            line_body_end
+        } else if bytes[line_body_end] == b'\r' && bytes.get(line_body_end + 1) == Some(&b'\n') {
+            line_body_end + 2
+        } else {
+            line_body_end + 1
+        };
         while literal_ranges
             .get(literal_cursor)
             .is_some_and(|range| range.end <= line_start)
@@ -143,13 +155,13 @@ fn custom_container_line(input: &str) -> Option<usize> {
         let is_literal = literal_ranges
             .get(literal_cursor)
             .is_some_and(|range| range.start < line_end && range.end > line_start);
-        let line = source_line.strip_suffix('\n').unwrap_or(source_line);
-        let line = line.strip_suffix('\r').unwrap_or(line);
+        let line = &input[line_start..line_body_end];
 
         if !is_literal && line_starts_custom_container(line) {
-            return Some(line_index + 1);
+            return Some(line_number);
         }
         line_start = line_end;
+        line_number += 1;
     }
 
     None
@@ -167,12 +179,18 @@ fn literal_block_ranges(input: &str) -> Vec<Range<usize>> {
 }
 
 fn line_starts_custom_container(line: &str) -> bool {
-    wrapping_parts(line).is_some_and(|parts| {
-        parts
-            .content
-            .trim_start_matches([' ', '\t'])
-            .starts_with(":::")
-    })
+    let mut content = line;
+    loop {
+        let Some(parts) = wrapping_parts(content) else {
+            return false;
+        };
+        if parts.content.len() == content.len() {
+            break;
+        }
+        content = parts.content;
+    }
+
+    content.trim_start_matches([' ', '\t']).starts_with(":::")
 }
 
 fn reflow_markdown(input: &str, width: usize) -> String {
@@ -733,8 +751,10 @@ mod tests {
         let fixtures = [
             ("Before.\n\n:::note\nBody.\n:::\n", 3),
             ("Before.\n\n> - :::note\n>   Body.\n>   :::\n", 3),
+            ("- - :::note\n    Wrapped\n    body.\n", 1),
             ("Term\n: :::note\n  Body.\n  :::\n", 2),
             ("[^note]: :::note\n    Body.\n    :::\n", 1),
+            ("Before.\r\r:::note\rBody.\r:::\r", 3),
         ];
 
         for (input, line) in fixtures {

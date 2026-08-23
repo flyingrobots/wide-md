@@ -54,7 +54,7 @@ Input must be UTF-8 Markdown. A leading UTF-8 byte-order mark is preserved byte-
 
 MDX is not supported. Whenever an `.mdx` path reaches formatting—including through an explicit path, an include glob during directory traversal, or `--stdout`—it is refused. Standard input has no filename or dialect metadata and is treated as Markdown; do not pipe MDX into `wide-md`.
 
-Custom `:::` containers and directives are also not supported yet. When a `:::` marker begins a Markdown content line, including inside a blockquote or list item, `wide-md` exits with status 2 and leaves that file unchanged. Literal `:::` text inside front matter, code blocks, and raw HTML blocks remains allowed.
+Custom `:::` containers and directives are also not supported yet. When a `:::` marker begins a Markdown content line, including inside a blockquote or list item, `wide-md` exits with status 2 and leaves that file unchanged. Literal `:::` text inside front matter, code blocks, and raw HTML blocks recognized by the built-in parser remains allowed.
 
 These checks cover known unsafe boundaries; they are not automatic recognition of every Markdown-derived language. Preview unfamiliar dialects with `--diff` before using write mode.
 
