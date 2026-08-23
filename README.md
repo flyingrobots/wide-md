@@ -52,6 +52,8 @@ Explicit file arguments are processed regardless of their extension or ignore st
 
 Input must be UTF-8 Markdown. A leading UTF-8 byte-order mark is preserved byte-for-byte and excluded from parsing so that following front matter remains recognizable.
 
+LF, CRLF, and bare-CR line endings are recognized. Structural line endings that survive formatting retain their source bytes. Width reflow reuses each line's terminator; an unterminated final line falls back to the first terminator present, or LF when the input has none.
+
 MDX is not supported. Whenever an `.mdx` path reaches formatting—including through an explicit path, an include glob during directory traversal, or `--stdout`—it is refused. Standard input has no filename or dialect metadata and is treated as Markdown; do not pipe MDX into `wide-md`.
 
 Custom `:::` containers and directives are also not supported yet. When a `:::` marker begins a Markdown content line, including inside a blockquote or list item, `wide-md` exits with status 2 and leaves that file unchanged. Literal `:::` text inside front matter, code blocks, and raw HTML blocks recognized by the built-in parser remains allowed.

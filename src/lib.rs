@@ -2,6 +2,7 @@
 
 pub mod cli;
 
+use std::borrow::Cow;
 use std::num::NonZeroUsize;
 use std::ops::Range;
 use std::{error, fmt};
@@ -82,8 +83,9 @@ pub fn unwrap_markdown(input: &str) -> Result<String, FormatError> {
 fn unwrap_markdown_body(input: &str) -> String {
     let mut output = String::with_capacity(input.len());
     let mut copied_through = 0;
+    let parser_input = normalize_bare_cr_for_parser(input);
 
-    for (event, source) in Parser::new_ext(input, parser_options()).into_offset_iter() {
+    for (event, source) in Parser::new_ext(&parser_input, parser_options()).into_offset_iter() {
         if matches!(event, Event::SoftBreak) && !follows_gfm_alert_marker(input, source.start) {
             debug_assert!(source.start >= copied_through);
             output.push_str(&input[copied_through..source.start]);
@@ -132,20 +134,9 @@ fn custom_container_line(input: &str) -> Option<usize> {
     let mut literal_cursor = 0;
     let mut line_start = 0;
     let mut line_number = 1;
-    let bytes = input.as_bytes();
 
     while line_start < input.len() {
-        let line_body_end = bytes[line_start..]
-            .iter()
-            .position(|byte| matches!(byte, b'\r' | b'\n'))
-            .map_or(input.len(), |offset| line_start + offset);
-        let line_end = if line_body_end == input.len() {
-            line_body_end
-        } else if bytes[line_body_end] == b'\r' && bytes.get(line_body_end + 1) == Some(&b'\n') {
-            line_body_end + 2
-        } else {
-            line_body_end + 1
-        };
+        let (line_end, line_body_end, _) = source_line_bounds(input, line_start);
         while literal_ranges
             .get(literal_cursor)
             .is_some_and(|range| range.end <= line_start)
@@ -168,7 +159,8 @@ fn custom_container_line(input: &str) -> Option<usize> {
 }
 
 fn literal_block_ranges(input: &str) -> Vec<Range<usize>> {
-    let ranges = Parser::new_ext(input, parser_options())
+    let parser_input = normalize_bare_cr_for_parser(input);
+    let ranges = Parser::new_ext(&parser_input, parser_options())
         .into_offset_iter()
         .filter_map(|(event, range)| match event {
             Event::Start(Tag::CodeBlock(_) | Tag::HtmlBlock | Tag::MetadataBlock(_)) => Some(range),
@@ -195,23 +187,17 @@ fn line_starts_custom_container(line: &str) -> bool {
 
 fn reflow_markdown(input: &str, width: usize) -> String {
     let protected = protected_ranges(input);
-    let inserted_newline = if input.contains("\r\n") { "\r\n" } else { "\n" };
+    let (_, _, first_line_ending) = source_line_bounds(input, 0);
+    let inserted_newline = if first_line_ending.is_empty() {
+        "\n"
+    } else {
+        first_line_ending
+    };
     let mut output = String::with_capacity(input.len());
     let mut line_start = 0;
 
     while line_start < input.len() {
-        let (line_end, body_end, line_ending) = match input[line_start..].find('\n') {
-            Some(relative_end) => {
-                let line_end = line_start + relative_end + 1;
-                let lf = line_end - 1;
-                if lf > line_start && input.as_bytes()[lf - 1] == b'\r' {
-                    (line_end, lf - 1, "\r\n")
-                } else {
-                    (line_end, lf, "\n")
-                }
-            }
-            None => (input.len(), input.len(), ""),
-        };
+        let (line_end, body_end, line_ending) = source_line_bounds(input, line_start);
 
         let body = &input[line_start..body_end];
         let is_protected = protected
@@ -236,7 +222,8 @@ fn reflow_markdown(input: &str, width: usize) -> String {
 }
 
 fn protected_ranges(input: &str) -> Vec<Range<usize>> {
-    let parser = Parser::new_ext(input, parser_options());
+    let parser_input = normalize_bare_cr_for_parser(input);
+    let parser = Parser::new_ext(&parser_input, parser_options());
     let mut ranges: Vec<_> = parser
         .reference_definitions()
         .iter()
@@ -277,6 +264,49 @@ fn merge_ranges(mut ranges: Vec<Range<usize>>) -> Vec<Range<usize>> {
         }
     }
     merged
+}
+
+fn normalize_bare_cr_for_parser(input: &str) -> Cow<'_, str> {
+    if !input
+        .match_indices('\r')
+        .any(|(index, _)| input.as_bytes().get(index + 1) != Some(&b'\n'))
+    {
+        return Cow::Borrowed(input);
+    }
+
+    // Replacing one ASCII byte with another keeps every parser source offset
+    // aligned with the original text used for byte-preserving edits.
+    let mut normalized = String::with_capacity(input.len());
+    let mut copied_through = 0;
+
+    for (index, _) in input.match_indices('\r') {
+        if input.as_bytes().get(index + 1) == Some(&b'\n') {
+            continue;
+        }
+        normalized.push_str(&input[copied_through..index]);
+        normalized.push('\n');
+        copied_through = index + 1;
+    }
+
+    normalized.push_str(&input[copied_through..]);
+    Cow::Owned(normalized)
+}
+
+fn source_line_bounds(input: &str, line_start: usize) -> (usize, usize, &str) {
+    let bytes = input.as_bytes();
+    let body_end = bytes[line_start..]
+        .iter()
+        .position(|byte| matches!(byte, b'\r' | b'\n'))
+        .map_or(input.len(), |offset| line_start + offset);
+    let line_end = if body_end == input.len() {
+        body_end
+    } else if bytes[body_end] == b'\r' && bytes.get(body_end + 1) == Some(&b'\n') {
+        body_end + 2
+    } else {
+        body_end + 1
+    };
+
+    (line_end, body_end, &input[body_end..line_end])
 }
 
 fn wrap_source_line(body: &str, line_ending: &str, inserted_newline: &str, width: usize) -> String {
@@ -777,6 +807,17 @@ mod tests {
     fn retains_crlf_and_missing_final_newline() {
         assert_eq!(unwrap("First\r\nsecond\r\n"), "First second\r\n");
         assert_eq!(unwrap("First\nsecond"), "First second");
+    }
+
+    #[test]
+    fn preserves_bare_cr_during_width_reflow() {
+        let input = "# Heading\r\r- Alpha beta gamma\r  delta epsilon.\r- Second item.\r";
+        let expected =
+            "# Heading\r\r- Alpha beta\r  gamma\r  delta\r  epsilon.\r- Second\r  item.\r";
+
+        let formatted = format_at_width(input, 12);
+        assert_eq!(formatted, expected);
+        assert_eq!(format_at_width(&formatted, 12), expected);
     }
 
     #[test]
