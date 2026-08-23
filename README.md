@@ -133,7 +133,7 @@ Path modes print only a final summary and errors to stderr, leaving stdout avail
 Exit statuses are:
 
 | Status | Meaning |
-|---:|---|
+| ---: | --- |
 | `0` | Formatting succeeded, a diff was produced successfully, or `--check` found no changes |
 | `1` | `--check` found files that would change |
 | `2` | Invalid usage, unsupported input, configuration failure, discovery failure, or file-processing failure |
