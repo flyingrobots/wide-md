@@ -91,11 +91,7 @@ The original acceptance criterion is met: no supported metadata block becomes pr
 
 ### 2. Keep filename inclusion separate from dialect support — refusal shipped
 
-The README at `3f9597d` demonstrated:
-
-```console
-$ wide-md --include='*.mdx' --include='*.mkd' docs/
-```
+The README at `3f9597d` demonstrated a directory command whose additional discovery globs included `*.mdx`. That example conflated filename discovery with dialect support and has been removed.
 
 `--include` only changes discovery. It does not add an MDX parser or protect MDX ESM and expression syntax. Historical probe at `3f9597d`:
 
