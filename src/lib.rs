@@ -129,13 +129,20 @@ fn reject_unsupported_syntax(input: &str) -> Result<(), FormatError> {
 
 fn custom_container_line(input: &str) -> Option<usize> {
     let literal_ranges = literal_block_ranges(input);
+    let mut literal_cursor = 0;
     let mut line_start = 0;
 
     for (line_index, source_line) in input.split_inclusive('\n').enumerate() {
         let line_end = line_start + source_line.len();
+        while literal_ranges
+            .get(literal_cursor)
+            .is_some_and(|range| range.end <= line_start)
+        {
+            literal_cursor += 1;
+        }
         let is_literal = literal_ranges
-            .iter()
-            .any(|range| range.start < line_end && range.end > line_start);
+            .get(literal_cursor)
+            .is_some_and(|range| range.start < line_end && range.end > line_start);
         let line = source_line.strip_suffix('\n').unwrap_or(source_line);
         let line = line.strip_suffix('\r').unwrap_or(line);
 
@@ -149,13 +156,14 @@ fn custom_container_line(input: &str) -> Option<usize> {
 }
 
 fn literal_block_ranges(input: &str) -> Vec<Range<usize>> {
-    Parser::new_ext(input, parser_options())
+    let ranges = Parser::new_ext(input, parser_options())
         .into_offset_iter()
         .filter_map(|(event, range)| match event {
             Event::Start(Tag::CodeBlock(_) | Tag::HtmlBlock | Tag::MetadataBlock(_)) => Some(range),
             _ => None,
         })
-        .collect()
+        .collect();
+    merge_ranges(ranges)
 }
 
 fn line_starts_custom_container(line: &str) -> bool {
@@ -235,6 +243,10 @@ fn protected_ranges(input: &str) -> Vec<Range<usize>> {
         }
     }
 
+    merge_ranges(ranges)
+}
+
+fn merge_ranges(mut ranges: Vec<Range<usize>>) -> Vec<Range<usize>> {
     ranges.sort_by_key(|range| range.start);
     let mut merged: Vec<Range<usize>> = Vec::with_capacity(ranges.len());
     for range in ranges {
